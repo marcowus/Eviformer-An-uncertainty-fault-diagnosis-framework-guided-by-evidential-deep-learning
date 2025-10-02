@@ -5,10 +5,14 @@
 <br> [Eviformer: An uncertainty fault diagnosis framework guided by evidential deep learning](https://www.sciencedirect.com/science/article/abs/pii/S095219762502336X?dgcid=coauthor)
 * Created by Jingjie Luo , Fucai Li *, Xiaolei Xu.
 * Journal: Engineering Applications of Artificial Intelligence
-* 
+* Schematic diagram of the Distribution Measurer
 <div align="center">
-<img src="https://github.com/LJJLJJ06/MDSAN/blob/main/%E7%A0%94%E7%A9%B6%E6%B5%81%E7%A8%8B%E5%9B%BE%E9%87%8D%E7%94%BB.jpg" width="600" />
-</div>
+<img src="https://github.com/Luojunqing666/Eviformer-An-uncertainty-fault-diagnosis-framework-guided-by-evidential-deep-learning/blob/main/Schematic%20diagram%20of%20the%20Distribution%20Measurer.png" width="600" />
+</div>  
+* The overall procedure of the proposed method
+<div align="center">
+<img src="" width="600" />
+</div>  
 
 ## Our operating environment
 * Python 3.8
