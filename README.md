@@ -1,2 +1,39 @@
-# Eviformer-An-uncertainty-fault-diagnosis-framework-guided-by-evidential-deep-learning
-Provide code for deep evidence learning using one-dimensional signals
+# Eviformer
+# Eviformer: An uncertainty fault diagnosis framework guided by evidential deep learning
+* Code about evidential deep learning and uncertainty quantification
+* Core codes for the paper:
+<br> [Eviformer: An uncertainty fault diagnosis framework guided by evidential deep learning](https://www.sciencedirect.com/science/article/abs/pii/S095219762502336X?dgcid=coauthor)
+* Created by Jingjie Luo , Fucai Li *, Xiaolei Xu.
+* Journal: Engineering Applications of Artificial Intelligence
+* 
+<div align="center">
+<img src="https://github.com/LJJLJJ06/MDSAN/blob/main/%E7%A0%94%E7%A9%B6%E6%B5%81%E7%A8%8B%E5%9B%BE%E9%87%8D%E7%94%BB.jpg" width="600" />
+</div>
+
+## Our operating environment
+* Python 3.8
+* pytorch  1.10.1
+* numpy  1.22.0 (If you get an error when saving data, try lowering your numpy version!)
+* and other necessary libs
+
+## Datasets
+* Any publicly available dataset that includes bearing or gear vibration signals can use this method.
+
+* ## Citation
+If our work is useful to you, please cite the following paper, it is the greatest encouragement to our open source work, thank you very much!
+```
+@paper{
+  title = {Eviformer: An uncertainty fault diagnosis framework guided by evidential deep learning},
+  author = {Jingjie Luo, Fucai Li, Xiaolei Xu, Wenqiang Zhao, Dongqing Zhang},
+  journal = {Engineering Applications of Artificial Intelligence},
+  volume = {161},
+  pages = {112328},
+  year = {2025},
+  doi = {doi.org/10.1016/j.engappai.2025.112328},
+  url = {https://www.sciencedirect.com/science/article/abs/pii/S095219762502336X},
+}
+```
+
+## Contact
+- luojingjie@hnu.edu.cn
+- luojingjie@sjtu.edu.cn
