@@ -11,7 +11,7 @@
 </div>  
 * The overall procedure of the proposed method
 <div align="center">
-<img src="" width="600" />
+<img src="https://github.com/Luojunqing666/Eviformer-An-uncertainty-fault-diagnosis-framework-guided-by-evidential-deep-learning/blob/main/The%20overall%20procedure%20of%20the%20proposed%20method.png" width="600" />
 </div>  
 
 ## Our operating environment
