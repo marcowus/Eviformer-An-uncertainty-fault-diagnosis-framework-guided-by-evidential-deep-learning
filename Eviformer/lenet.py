@@ -4,7 +4,7 @@ import warnings
 from collections import OrderedDict
 
 class LeNet(nn.Module):
-    def __init__(self, dropout=False):
+    def __init__(self, dropout: bool = False, num_classes: int = 4):
         super().__init__()
         self.use_dropout = dropout
 
@@ -39,7 +39,7 @@ class LeNet(nn.Module):
             nn.ReLU(inplace=True),
 
         )
-        self.fc = nn.Linear(256, 6) # Change the last parameter acroding the class number
+        self.fc = nn.Linear(256, num_classes)
 
 
     def forward(self, x):

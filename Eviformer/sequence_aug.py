@@ -1,132 +1,164 @@
+"""Utility transforms for sequential sensor data."""
+from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import Callable, Sequence
 
 import numpy as np
-import random
 from scipy.signal import resample
 
-
-class Compose(object):
-    def __init__(self, transforms):
-        self.transforms = transforms
-
-    def __call__(self, seq):
-        for t in self.transforms:
-            seq = t(seq)
-        return seq
-
-
-class Reshape(object):
-    def __call__(self, seq):
-        #print(seq.shape)
-        return seq.transpose()
+__all__ = [
+    "Compose",
+    "Ensure2d",
+    "ToFloat32",
+    "Normalize",
+    "AddGaussian",
+    "RandomAddGaussian",
+    "RandomScale",
+    "RandomStretch",
+    "RandomDropout",
+]
 
 
-class Retype(object):
-    def __call__(self, seq):
-        return seq.astype(np.float32)
+Transform = Callable[[np.ndarray], np.ndarray]
 
 
-class AddGaussian(object):
-    def __init__(self, sigma=0.01):
+@dataclass(frozen=True)
+class Compose:
+    """Compose multiple numpy-based transforms."""
+
+    transforms: Sequence[Transform]
+
+    def __call__(self, seq: np.ndarray) -> np.ndarray:
+        array = np.asarray(seq)
+        for transform in self.transforms:
+            array = transform(array)
+        return array
+
+
+class Ensure2d:
+    """Ensure that the incoming signal is 2D with shape (channels, length)."""
+
+    def __call__(self, seq: np.ndarray) -> np.ndarray:
+        array = np.asarray(seq)
+        if array.ndim == 1:
+            array = array[np.newaxis, :]
+        elif array.ndim > 2:
+            array = array.reshape(array.shape[0], -1)
+        if array.shape[0] > array.shape[-1]:
+            array = array.T
+        return array
+
+
+class ToFloat32:
+    """Cast the incoming array to ``float32`` for PyTorch compatibility."""
+
+    def __call__(self, seq: np.ndarray) -> np.ndarray:
+        return np.asarray(seq, dtype=np.float32)
+
+
+class Normalize:
+    """Normalize an array using one of a few common schemes."""
+
+    def __init__(self, mode: str = "-1-1") -> None:
+        supported = {"0-1", "-1-1", "mean-std"}
+        if mode not in supported:
+            raise ValueError(f"Unsupported normalization mode: {mode!r}")
+        self.mode = mode
+
+    def __call__(self, seq: np.ndarray) -> np.ndarray:
+        array = np.asarray(seq, dtype=np.float32)
+        if self.mode == "0-1":
+            minimum = np.min(array)
+            maximum = np.max(array)
+            denom = maximum - minimum
+            if denom == 0:
+                return np.zeros_like(array)
+            return (array - minimum) / denom
+        if self.mode == "-1-1":
+            minimum = np.min(array)
+            maximum = np.max(array)
+            denom = maximum - minimum
+            if denom == 0:
+                return np.zeros_like(array)
+            return 2 * (array - minimum) / denom - 1
+        mean = np.mean(array)
+        std = np.std(array)
+        if std == 0:
+            return np.zeros_like(array)
+        return (array - mean) / std
+
+
+class AddGaussian:
+    """Additive Gaussian noise transform."""
+
+    def __init__(self, sigma: float = 0.01) -> None:
         self.sigma = sigma
 
-    def __call__(self, seq):
-        return seq + np.random.normal(loc=0, scale=self.sigma, size=seq.shape)
+    def __call__(self, seq: np.ndarray) -> np.ndarray:
+        noise = np.random.normal(loc=0.0, scale=self.sigma, size=seq.shape)
+        return np.asarray(seq) + noise
 
 
-class RandomAddGaussian(object):
-    def __init__(self, sigma=0.01):
+class RandomAddGaussian(AddGaussian):
+    """Randomly apply additive Gaussian noise with probability 0.5."""
+
+    def __call__(self, seq: np.ndarray) -> np.ndarray:
+        if np.random.randint(2):
+            return np.asarray(seq)
+        return super().__call__(seq)
+
+
+class RandomScale:
+    """Randomly scale each channel with a Gaussian-distributed factor."""
+
+    def __init__(self, sigma: float = 0.01) -> None:
         self.sigma = sigma
 
-    def __call__(self, seq):
+    def __call__(self, seq: np.ndarray) -> np.ndarray:
+        array = np.asarray(seq)
         if np.random.randint(2):
-            return seq
-        else:
-            return seq + np.random.normal(loc=0, scale=self.sigma, size=seq.shape)
+            return array
+        scale_factor = np.random.normal(loc=1.0, scale=self.sigma, size=(array.shape[0], 1))
+        return array * scale_factor
 
 
-# class Scale(object):
-#     def __init__(self, sigma=0.01):
-#         self.sigma = sigma
-#
-#     def __call__(self, seq):
-#         scale_factor = np.random.normal(loc=1, scale=self.sigma, size=(seq.shape[0], 1))
-#         scale_matrix = np.matmul(scale_factor, np.ones((1, seq.shape[1])))
-#         return seq*scale_matrix
+class RandomStretch:
+    """Randomly stretch or compress a signal along the time dimension."""
 
-
-class RandomScale(object):
-    def __init__(self, sigma=0.01):
+    def __init__(self, sigma: float = 0.3) -> None:
         self.sigma = sigma
 
-    def __call__(self, seq):
+    def __call__(self, seq: np.ndarray) -> np.ndarray:
+        array = np.asarray(seq)
         if np.random.randint(2):
-            return seq
-        else:
-            scale_factor = np.random.normal(loc=1, scale=self.sigma, size=(seq.shape[0], 1))
-            scale_matrix = np.matmul(scale_factor, np.ones((1, seq.shape[1])))
-            return seq*scale_matrix
+            return array
+        length = array.shape[-1]
+        new_length = int(length * (1 + (np.random.rand() - 0.5) * self.sigma))
+        stretched = np.zeros_like(array)
+        for channel in range(array.shape[0]):
+            resampled = resample(array[channel], new_length)
+            if new_length <= length:
+                offset = np.random.randint(0, length - new_length + 1)
+                stretched[channel, offset : offset + new_length] = resampled
+            else:
+                offset = np.random.randint(0, new_length - length + 1)
+                stretched[channel] = resampled[offset : offset + length]
+        return stretched
 
 
-class RandomStretch(object):
-    def __init__(self, sigma=0.3):
-        self.sigma = sigma
+class RandomDropout:
+    """Randomly zero out a contiguous region of the signal."""
 
-    def __call__(self, seq):
+    def __init__(self, drop_len: int = 20) -> None:
+        self.drop_len = drop_len
+
+    def __call__(self, seq: np.ndarray) -> np.ndarray:
+        array = np.asarray(seq)
         if np.random.randint(2):
-            return seq
-        else:
-            seq_aug = np.zeros(seq.shape)
-            len = seq.shape[1]
-            length = int(len * (1 + (random.random()-0.5)*self.sigma))
-            for i in range(seq.shape[0]):
-                y = resample(seq[i, :], length)
-                if length < len:
-                    if random.random() < 0.5:
-                        seq_aug[i, :length] = y
-                    else:
-                        seq_aug[i, len-length:] = y
-                else:
-                    if random.random() < 0.5:
-                        seq_aug[i, :] = y[:len]
-                    else:
-                        seq_aug[i, :] = y[length-len:]
-            return seq_aug
-
-
-class RandomCrop(object):
-    def __init__(self, crop_len=20):
-        self.crop_len = crop_len
-
-    def __call__(self, seq):
-        if np.random.randint(2):
-            return seq
-        else:
-            max_index = seq.shape[1] - self.crop_len
-            random_index = np.random.randint(max_index)
-            seq[:, random_index:random_index+self.crop_len] = 0
-            return seq
-
-class Normalize(object):
-    def __init__(self, type = "0-1"): # "0-1","-1-1","mean-std"
-        self.type = type
-
-    def __call__(self, seq):
-        if  self.type == "0-1":
-            seq =(seq-seq.min())/(seq.max()-seq.min())
-        elif  self.type == "-1-1":
-            seq = 2*(seq-seq.min())/(seq.max()-seq.min()) + -1
-        elif self.type == "mean-std" :
-            seq = (seq-seq.mean())/seq.std()
-        else:
-            raise NameError('This normalization is not included!')
-
-        return seq
-
-# class Scale(object):
-#     def __init__(self, factor=1.0):
-#         self.factor = factor
-#
-#     def __call__(self, seq):
-#         seq = seq*self.factor
-#         return seq
+            return array
+        max_index = max(array.shape[-1] - self.drop_len, 1)
+        start = np.random.randint(0, max_index)
+        array = array.copy()
+        array[..., start : start + self.drop_len] = 0
+        return array

@@ -1,147 +1,283 @@
+"""High level data-loading utilities for the CWRU bearing dataset."""
+from __future__ import annotations
+
+import argparse
+import json
 import os
-import pandas as pd
-from scipy.io import loadmat
+import re
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+
+import numpy as np
 from sklearn.model_selection import train_test_split
-from SequenceDatasets import dataset
-from sequence_aug import *
-from tqdm import tqdm
 from torch.utils.data import DataLoader
 
-###Using CWRU data set
-signal_size = 1024
+from .SequenceDatasets import BearingSequenceDataset, SequenceSample
+from .sequence_aug import Compose, Ensure2d, Normalize, ToFloat32
+
+__all__ = [
+    "DatasetSummary",
+    "build_dataloaders",
+    "discover_npz_files",
+    "load_npz_segments",
+    "main",
+]
 
 
-datasetname = ["12k Drive End Bearing Fault Data", "12k Fan End Bearing Fault Data", "48k Drive End Bearing Fault Data",
-               "Normal Baseline Data"]
-normalname = ["97.mat", "98.mat", "99.mat", "100.mat"]
+FAULT_KEYWORDS: Mapping[str, Tuple[str, ...]] = {
+    "normal": ("normal",),
+    "ball": ("_b_",),
+    "inner_race": ("_ir_",),
+    "outer_race": ("_or@",),
+}
+RPM_PATTERN = re.compile(r"(?P<rpm>\d+)\s*rpm", re.IGNORECASE)
+LOCATION_PATTERN = re.compile(r"_(DE|FE|BA)(\d+)?", re.IGNORECASE)
 
-# For 12k Drive End Bearing Fault Data
-dataname1 = ["105.mat", "118.mat", "130.mat", "169.mat", "185.mat", "197.mat", "209.mat", "222.mat",
-             "234.mat"]  # 1797rpm
-dataname2 = ["106.mat", "119.mat", "131.mat", "170.mat", "186.mat", "198.mat", "210.mat", "223.mat",
-             "235.mat"]  # 1772rpm
-dataname3 = ["107.mat", "120.mat", "132.mat", "171.mat", "187.mat", "199.mat", "211.mat", "224.mat",
-             "236.mat"]  # 1750rpm
-dataname4 = ["108.mat", "121.mat", "133.mat", "172.mat", "188.mat", "200.mat", "212.mat", "225.mat",
-             "237.mat"]  # 1730rpm
-# For 12k Fan End Bearing Fault Data
-dataname5 = ["278.mat", "282.mat", "294.mat", "274.mat", "286.mat", "310.mat", "270.mat", "290.mat",
-             "315.mat"]  # 1797rpm
-dataname6 = ["279.mat", "283.mat", "295.mat", "275.mat", "287.mat", "309.mat", "271.mat", "291.mat",
-             "316.mat"]  # 1772rpm
-dataname7 = ["280.mat", "284.mat", "296.mat", "276.mat", "288.mat", "311.mat", "272.mat", "292.mat",
-             "317.mat"]  # 1750rpm
-dataname8 = ["281.mat", "285.mat", "297.mat", "277.mat", "289.mat", "312.mat", "273.mat", "293.mat",
-             "318.mat"]  # 1730rpm
-# For 48k Drive End Bearing Fault Data
-dataname9 = ["109.mat", "122.mat", "135.mat", "174.mat", "189.mat", "201.mat", "213.mat", "250.mat",
-             "262.mat"]  # 1797rpm
-dataname10 = ["110.mat", "123.mat", "136.mat", "175.mat", "190.mat", "202.mat", "214.mat", "251.mat",
-              "263.mat"]  # 1772rpm
-dataname11 = ["111.mat", "124.mat", "137.mat", "176.mat", "191.mat", "203.mat", "215.mat", "252.mat",
-              "264.mat"]  # 1750rpm
-dataname12 = ["112.mat", "125.mat", "138.mat", "177.mat", "192.mat", "204.mat", "217.mat", "253.mat",
-              "265.mat"]  # 1730rpm
-label
-label = [1, 2, 3, 4, 5, 6, 7, 8, 9]  # The failure data is labeled 1-9
-
-axis = ["_DE_time", "_FE_time", "_BA_time"]
-
-# generate Training Dataset and Testing Dataset
-def get_files(root, test=False):
-    '''
-    This function is used to generate the final training set and test set.
-    root:The location of the data set
-    normalname:List of normal data
-    dataname:List of failure data
-    '''
-    data_root1 = os.path.join('/tmp', root, datasetname[0])
-    # data_root1 = os.path.join('/tmp', root, datasetname[3])
-    data_root2 = os.path.join('/tmp', root, datasetname[0])
-
-    path1 = os.path.join('/tmp', data_root1, normalname[0])  # 0->1797rpm ;1->1772rpm;2->1750rpm;3->1730rpm
-    data, lab = data_load(path1, axisname=normalname[0], label=0)  # nThe label for normal data is 0
-
-    for i in tqdm(range(len(dataname1))):  # 这里可能需要改
-        path2 = os.path.join('/tmp', data_root2, dataname1[i])
-
-        data1, lab1 = data_load(path2, dataname1[i], label=label[i])
-        data += data1
-        lab += lab1
-    return [data, lab]
+DATA_LOADERS: Dict[str, DataLoader] = {}
+FIRST_SAMPLE: Optional[Tuple[np.ndarray, int]] = None
 
 
-def data_load(filename, axisname, label):
-    '''
-    This function is mainly used to generate test data and training data.
-    filename:Data location
-    axisname:Select which channel's data,---->"_DE_time","_FE_time","_BA_time"
-    '''
-    datanumber = axisname.split(".")
-    if eval(datanumber[0]) < 100:
-        realaxis = "X0" + datanumber[0] + axis[0]
+@dataclass(frozen=True)
+class DatasetSummary:
+    """Metadata describing a prepared dataset."""
+
+    source_root: Path
+    label_to_index: Dict[str, int]
+    split_sizes: Dict[str, int]
+    window_size: int
+    step_size: int
+    samples_per_label: Dict[str, int]
+
+
+def discover_npz_files(root: Path) -> List[Path]:
+    """Recursively discover ``.npz`` files under ``root``."""
+
+    if not root.exists():
+        raise FileNotFoundError(f"Data root {root} does not exist")
+    files = sorted(path for path in root.rglob("*.npz") if path.is_file())
+    if not files:
+        raise FileNotFoundError(f"No .npz files were found under {root}")
+    return files
+
+
+def infer_fault_label(filename: str) -> str:
+    lower = filename.lower()
+    for label, tokens in FAULT_KEYWORDS.items():
+        if any(token in lower for token in tokens):
+            return label
+    raise ValueError(f"Unable to infer fault label from filename: {filename}")
+
+
+def infer_rpm(path: Path) -> Optional[int]:
+    for part in path.parts[::-1]:
+        match = RPM_PATTERN.search(part)
+        if match:
+            return int(match.group("rpm"))
+    return None
+
+
+def infer_sensor_location(filename: str) -> Optional[str]:
+    match = LOCATION_PATTERN.search(filename)
+    if match:
+        return match.group(1).upper()
+    return None
+
+
+def load_npz_segments(
+    path: Path,
+    window_size: int,
+    step_size: Optional[int] = None,
+) -> np.ndarray:
+    """Load a ``.npz`` file and segment signals into fixed-length windows."""
+
+    step = step_size or window_size
+    with np.load(path) as npz_file:
+        arrays: List[np.ndarray] = []
+        for key in sorted(npz_file.files):
+            values = np.asarray(npz_file[key])
+            if values.ndim == 0:
+                continue
+            if values.ndim == 1:
+                arrays.append(values[np.newaxis, :])
+            else:
+                leading_dim = values.shape[0]
+                arrays.append(values.reshape(leading_dim, -1))
+    if not arrays:
+        raise ValueError(f"No usable arrays were found in {path}")
+    signals = np.concatenate(arrays, axis=0)
+    segments: List[np.ndarray] = []
+    for row in np.atleast_2d(signals):
+        if row.size < window_size:
+            raise ValueError(
+                f"Signal length {row.size} in {path} is shorter than window size {window_size}"
+            )
+        for start in range(0, row.size - window_size + 1, step):
+            segments.append(row[start : start + window_size])
+    return np.stack(segments)
+
+
+def build_samples(
+    files: Sequence[Path],
+    window_size: int,
+    step_size: Optional[int],
+) -> Tuple[List[SequenceSample], Dict[str, int], Dict[str, int]]:
+    """Build ``SequenceSample`` instances from raw files."""
+
+    label_to_index: Dict[str, int] = {}
+    samples: List[SequenceSample] = []
+    per_label: Dict[str, int] = {}
+    for file_path in files:
+        fault_label = infer_fault_label(file_path.name)
+        label_index = label_to_index.setdefault(fault_label, len(label_to_index))
+        rpm = infer_rpm(file_path)
+        location = infer_sensor_location(file_path.name)
+        segments = load_npz_segments(file_path, window_size, step_size)
+        per_label[fault_label] = per_label.get(fault_label, 0) + len(segments)
+        for segment_idx, segment in enumerate(segments):
+            metadata = {
+                "source": file_path,
+                "fault_label": fault_label,
+                "rpm": rpm,
+                "sensor_location": location,
+                "segment": segment_idx,
+            }
+            samples.append(SequenceSample(values=segment, label=label_index, metadata=metadata))
+    return samples, label_to_index, per_label
+
+
+def stratified_split(
+    labels: Sequence[int],
+    val_split: float,
+    test_split: float,
+    random_state: int,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    indices = np.arange(len(labels))
+    labels_array = np.asarray(labels)
+    if val_split + test_split == 0:
+        return indices, np.array([], dtype=int), np.array([], dtype=int)
+    if test_split > 0:
+        train_indices, temp_indices, train_labels, temp_labels = train_test_split(
+            indices,
+            labels_array,
+            test_size=val_split + test_split,
+            stratify=labels_array,
+            random_state=random_state,
+        )
+        relative_test = test_split / (val_split + test_split)
+        val_indices, test_indices = train_test_split(
+            temp_indices,
+            test_size=relative_test,
+            stratify=temp_labels,
+            random_state=random_state,
+        )
     else:
-        realaxis = "X" + datanumber[0] + axis[0]
-    fl = loadmat(filename)[realaxis]
-    data = []
-    lab = []
-    start, end = 0, signal_size
-    while end <= fl.shape[0]:
-        data.append(fl[start:end])
-        lab.append(label)
-        # start += signal_size
-        # end += signal_size
-        start += 1024  # Overlapping swipe:512
-        end += 1024
-    return data, lab
+        train_indices, val_indices = train_test_split(
+            indices,
+            labels_array,
+            test_size=val_split,
+            stratify=labels_array,
+            random_state=random_state,
+        )
+        test_indices = np.array([], dtype=int)
+    return train_indices, val_indices, test_indices
 
 
-def data_transforms(dataset_type="train", normlize_type="-1-1"):
-    transforms = {
-        'train': Compose([
-            Reshape(),
-            Normalize(normlize_type),
-            Retype()
+def build_dataloaders(
+    data_root: Path,
+    batch_size: int = 64,
+    val_split: float = 0.2,
+    test_split: float = 0.0,
+    window_size: int = 1024,
+    step_size: Optional[int] = None,
+    normalization: str = "-1-1",
+    num_workers: int = 0,
+    random_state: int = 42,
+) -> Tuple[Dict[str, DataLoader], DatasetSummary]:
+    """Create PyTorch dataloaders for the CWRU dataset."""
 
-        ]),
-        'val': Compose([
-            Reshape(),
-            Normalize(normlize_type),
-            Retype()
-        ])
-    }
-    return transforms[dataset_type]
-
-
-
-def load_cwru_dataset(data_dir, normlizetype, test=False):
-    num_classes = 7  ##make a change
-    input_channel = 1
-
-    list_data = get_files(data_dir, test)
-    if test:
-        test_dataset = dataset(list_data=list_data, test=True, transform=None)
-        return test_dataset
-    else:
-        data_pd = pd.DataFrame({"data": list_data[0], "label": list_data[1]})
-        train_pd, val_pd = train_test_split(data_pd, test_size=0.20, random_state=40, stratify=data_pd["label"])
-        train_dataset = dataset(list_data=train_pd, transform=data_transforms('train', normlizetype))
-        val_dataset = dataset(list_data=val_pd, transform=data_transforms('val', normlizetype))
-        return train_dataset, val_dataset
-
-
-# Call a function and pass in parameters when executed directly
-if __name__ == "__main__":
-    data_train, data_val = load_cwru_dataset('D:\\CWRU', "0-1")
-
-    dataloader_train = DataLoader(
-        data_train, batch_size=16, shuffle=True, num_workers=0
+    files = discover_npz_files(data_root)
+    samples, label_to_index, per_label = build_samples(files, window_size, step_size)
+    transform = Compose([Ensure2d(), Normalize(normalization), ToFloat32()])
+    dataset = BearingSequenceDataset(samples, transform=transform)
+    train_idx, val_idx, test_idx = stratified_split(
+        dataset.labels, val_split, test_split, random_state
     )
-    dataloader_val = DataLoader(data_val, batch_size=16, num_workers=0)
+    dataloaders: Dict[str, DataLoader] = {}
+    train_dataset = dataset.subset(train_idx) if len(train_idx) else dataset
+    dataloaders["train"] = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+    )
+    if len(val_idx):
+        val_dataset = dataset.subset(val_idx)
+    else:
+        val_dataset = dataset.subset(train_idx) if len(train_idx) else dataset
+    dataloaders["val"] = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+    )
+    if len(test_idx):
+        test_dataset = dataset.subset(test_idx)
+        dataloaders["test"] = DataLoader(
+            test_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+        )
+    summary = DatasetSummary(
+        source_root=data_root,
+        label_to_index=label_to_index,
+        split_sizes={key: len(loader.dataset) for key, loader in dataloaders.items()},
+        window_size=window_size,
+        step_size=step_size or window_size,
+        samples_per_label=per_label,
+    )
+    if train_idx.size:
+        first_dataset = dataset.subset(train_idx)
+        example = first_dataset[0]
+    else:
+        example = dataset[0]
+    global DATA_LOADERS, FIRST_SAMPLE
+    DATA_LOADERS = dataloaders
+    tensor, label = example
+    FIRST_SAMPLE = (tensor.detach().cpu().numpy(), int(label))
+    return dataloaders, summary
 
-    dataloaders = {
-        "train": dataloader_train,
-        "val": dataloader_val,
-    }
 
-    digit_one, _ = data_val[5]
+def main(argv: Optional[Sequence[str]] = None) -> None:
+    parser = argparse.ArgumentParser(description="Prepare CWRU dataloaders")
+    parser.add_argument("--data-root", type=Path, default=os.environ.get("CWRU_DATA_ROOT"))
+    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--val-split", type=float, default=0.2)
+    parser.add_argument("--test-split", type=float, default=0.0)
+    parser.add_argument("--window-size", type=int, default=1024)
+    parser.add_argument("--step-size", type=int, default=None)
+    parser.add_argument("--normalization", choices=["0-1", "-1-1", "mean-std"], default="-1-1")
+    parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--random-state", type=int, default=42)
+    args = parser.parse_args(argv)
+    if args.data_root is None:
+        raise ValueError("`--data-root` must be provided or set via CWRU_DATA_ROOT")
+    dataloaders, summary = build_dataloaders(
+        data_root=args.data_root,
+        batch_size=args.batch_size,
+        val_split=args.val_split,
+        test_split=args.test_split,
+        window_size=args.window_size,
+        step_size=args.step_size,
+        normalization=args.normalization,
+        num_workers=args.num_workers,
+        random_state=args.random_state,
+    )
+    print(json.dumps(asdict(summary), indent=2, default=str))
+    for split, loader in dataloaders.items():
+        print(f"{split}: {len(loader.dataset)} samples")
+
+
+if __name__ == "__main__":
+    main()
