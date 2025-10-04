@@ -130,16 +130,18 @@ def load_cwru_dataset(data_dir, normlizetype, test=False):
         return train_dataset, val_dataset
 
 
-# Call a function and pass in parameters
-data_train, data_val = load_cwru_dataset('D:\CWRU', "0-1")
+# Call a function and pass in parameters when executed directly
+if __name__ == "__main__":
+    data_train, data_val = load_cwru_dataset('D:\\CWRU', "0-1")
 
-dataloader_train = DataLoader(
-            data_train, batch_size=16, shuffle=True, num_workers=0)
-dataloader_val = DataLoader(data_val, batch_size=16, num_workers=0)
+    dataloader_train = DataLoader(
+        data_train, batch_size=16, shuffle=True, num_workers=0
+    )
+    dataloader_val = DataLoader(data_val, batch_size=16, num_workers=0)
 
-dataloaders = {
-    "train": dataloader_train,
-    "val": dataloader_val,
-}
+    dataloaders = {
+        "train": dataloader_train,
+        "val": dataloader_val,
+    }
 
-digit_one, _ = data_val[5]
+    digit_one, _ = data_val[5]
