@@ -1,140 +1,197 @@
-import torch
-import torch.nn as nn
+"""Training utilities for Eviformer models."""
+from __future__ import annotations
+
 import copy
 import time
-from helpers import get_device, one_hot_embedding
-from losses import relu_evidence, exp_evidence
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
+
+import torch
+from torch.utils.data import DataLoader
+
+from .helpers import get_device, one_hot_embedding
+from .losses import relu_evidence
+
+__all__ = ["TrainingConfig", "EpochMetrics", "TrainingHistory", "train_model"]
+
+
+@dataclass
+class TrainingConfig:
+    num_epochs: int = 100
+    num_classes: int = 4
+    uncertainty: bool = False
+
+
+@dataclass
+class EpochMetrics:
+    epoch: int
+    phase: str
+    loss: float
+    accuracy: float
+    mean_evidence: Optional[float] = None
+    mean_evidence_success: Optional[float] = None
+    mean_evidence_fail: Optional[float] = None
+    mean_uncertainty: Optional[float] = None
+
+
+@dataclass
+class TrainingHistory:
+    epochs: List[EpochMetrics]
+    best_epoch: int
+    best_accuracy: float
+    duration_seconds: float
 
 
 def train_model(
-    model,
-    dataloaders,
-    num_classes,
+    model: torch.nn.Module,
+    dataloaders: Dict[str, DataLoader],
+    num_classes: int,
     criterion,
     optimizer,
     scheduler=None,
-    num_epochs=100,
-    device=None,
-    uncertainty=False,
-):
+    num_epochs: int = 100,
+    device: Optional[torch.device] = None,
+    uncertainty: bool = False,
+) -> Tuple[torch.nn.Module, TrainingHistory]:
+    """Train a model and return the best-performing state along with metrics."""
 
-    since = time.time()
-
-    if not device:
+    config = TrainingConfig(num_epochs=num_epochs, num_classes=num_classes, uncertainty=uncertainty)
+    if device is None:
         device = get_device()
+    model = model.to(device)
 
+    since = time.perf_counter()
     best_model_wts = copy.deepcopy(model.state_dict())
     best_acc = 0.0
+    best_epoch = -1
+    history: List[EpochMetrics] = []
 
-    losses = {"loss": [], "phase": [], "epoch": []}
-    accuracy = {"accuracy": [], "phase": [], "epoch": []}
-    evidences = {"evidence": [], "type": [], "epoch": []}
-
-    for epoch in range(num_epochs):
-        print("Epoch {}/{}".format(epoch, num_epochs - 1))
+    for epoch in range(config.num_epochs):
+        print(f"Epoch {epoch + 1}/{config.num_epochs}")
         print("-" * 10)
 
-        # Each epoch has a training and validation phase
-        for phase in ["train", "val"]:
-            if phase == "train":
-                print("Training...")
-                model.train()  # Set model to training mode
+        for phase in ("train", "val"):
+            if phase not in dataloaders:
+                continue
+            is_train = phase == "train"
+            if is_train:
+                model.train()
             else:
-                print("Validating...")
-                model.eval()  # Set model to evaluate mode
+                model.eval()
 
             running_loss = 0.0
             running_corrects = 0.0
-            correct = 0
+            evidence_sum = 0.0
+            success_evidence_sum = 0.0
+            fail_evidence_sum = 0.0
+            uncertainty_sum = 0.0
+            match_sum = 0.0
+            sample_count = 0
 
-            # Iterate over data.
-            for i, (inputs, labels) in enumerate(dataloaders[phase]):
-
+            for inputs, labels, *_ in dataloaders[phase]:
                 inputs = inputs.to(device)
                 labels = labels.to(device)
-
-                # zero the parameter gradients
                 optimizer.zero_grad()
 
-                # forward
-                # track history if only in train
-                with torch.set_grad_enabled(phase == "train"):
-
-                    if uncertainty:
-                        y = one_hot_embedding(labels, num_classes)
-                        y = y.to(device)
-                        outputs = model(inputs)
-                        _, preds = torch.max(outputs, 1)
+                with torch.set_grad_enabled(is_train):
+                    outputs = model(inputs)
+                    _, preds = torch.max(outputs, 1)
+                    if config.uncertainty:
+                        targets = one_hot_embedding(labels, config.num_classes)
                         loss = criterion(
-                            outputs, y.float(), epoch, num_classes, 10, device
+                            outputs,
+                            targets.float(),
+                            epoch,
+                            config.num_classes,
+                            10,
+                            device,
                         )
-
-                        match = torch.reshape(torch.eq(preds, labels).float(), (-1, 1))
-                        acc = torch.mean(match)
-                        # evidence = exp_evidence(outputs) # 解决准确率问题
+                        match = torch.eq(preds, labels).float().unsqueeze(1)
                         evidence = relu_evidence(outputs)
                         alpha = evidence + 1
-                        u = num_classes / torch.sum(alpha, dim=1, keepdim=True)
+                        batch_uncertainty = (
+                            config.num_classes / torch.sum(alpha, dim=1, keepdim=True)
+                        )
+                        batch_total_evidence = torch.sum(evidence, dim=1, keepdim=True)
 
-                        total_evidence = torch.sum(evidence, 1, keepdim=True)
-                        mean_evidence = torch.mean(total_evidence)
-                        mean_evidence_succ = torch.sum(
-                            torch.sum(evidence, 1, keepdim=True) * match
-                        ) / torch.sum(match + 1e-20)
-                        mean_evidence_fail = torch.sum(
-                            torch.sum(evidence, 1, keepdim=True) * (1 - match)
-                        ) / (torch.sum(torch.abs(1 - match)) + 1e-20)
-
+                        evidence_sum += batch_total_evidence.sum().item()
+                        success_evidence_sum += (batch_total_evidence * match).sum().item()
+                        fail_evidence_sum += (
+                            batch_total_evidence * (1.0 - match)
+                        ).sum().item()
+                        uncertainty_sum += batch_uncertainty.sum().item()
+                        match_sum += match.sum().item()
                     else:
-                        outputs = model(inputs)
-                        _, preds = torch.max(outputs, 1)
                         loss = criterion(outputs, labels)
 
-                    if phase == "train":
+                    if is_train:
                         loss.backward()
                         optimizer.step()
 
-                # statistics
                 running_loss += loss.item() * inputs.size(0)
-                running_corrects += torch.sum(preds == labels.data)
+                running_corrects += torch.sum(preds == labels).item()
+                sample_count += inputs.size(0)
 
-            if scheduler is not None:
-                if phase == "train":
-                    scheduler.step()
+            if scheduler is not None and is_train:
+                scheduler.step()
 
-            epoch_loss = running_loss / len(dataloaders[phase].dataset)
-            epoch_acc = running_corrects.double() / len(dataloaders[phase].dataset)
+            dataset_size = len(dataloaders[phase].dataset)
+            if dataset_size == 0:
+                continue
+            epoch_loss = running_loss / dataset_size
+            epoch_acc = running_corrects / dataset_size
 
-            losses["loss"].append(epoch_loss)
-            losses["phase"].append(phase)
-            losses["epoch"].append(epoch)
-            accuracy["accuracy"].append(epoch_acc.item())
-            accuracy["epoch"].append(epoch)
-            accuracy["phase"].append(phase)
+            if config.uncertainty and sample_count:
+                mean_evidence = evidence_sum / sample_count
+                successes = match_sum
+                failures = sample_count - successes
+                mean_evidence_success = (
+                    success_evidence_sum / successes if successes else None
+                )
+                mean_evidence_fail = (
+                    fail_evidence_sum / failures if failures else None
+                )
+                mean_uncertainty = uncertainty_sum / sample_count
+            else:
+                mean_evidence = None
+                mean_evidence_success = None
+                mean_evidence_fail = None
+                mean_uncertainty = None
 
-            print(
-                "{} loss: {:.4f} acc: {:.4f}".format(
-                    phase.capitalize(), epoch_loss, epoch_acc
+            history.append(
+                EpochMetrics(
+                    epoch=epoch,
+                    phase=phase,
+                    loss=epoch_loss,
+                    accuracy=epoch_acc,
+                    mean_evidence=mean_evidence,
+                    mean_evidence_success=mean_evidence_success,
+                    mean_evidence_fail=mean_evidence_fail,
+                    mean_uncertainty=mean_uncertainty,
                 )
             )
 
-            # deep copy the model
-            if phase == "val" and epoch_acc > best_acc:
+            print(f"{phase.capitalize()} loss: {epoch_loss:.4f} acc: {epoch_acc:.4f}")
+            if not is_train and epoch_acc > best_acc:
                 best_acc = epoch_acc
                 best_model_wts = copy.deepcopy(model.state_dict())
+                best_epoch = epoch
 
         print()
 
-    time_elapsed = time.time() - since
+    duration = time.perf_counter() - since
     print(
         "Training complete in {:.0f}m {:.0f}s".format(
-            time_elapsed // 60, time_elapsed % 60
+            duration // 60, duration % 60
         )
     )
-    print("Best val Acc: {:4f}".format(best_acc))
+    print(f"Best val Acc: {best_acc:.4f}")
 
-    # load best model weights
     model.load_state_dict(best_model_wts)
-    metrics = (losses, accuracy)
-
+    metrics = TrainingHistory(
+        epochs=history,
+        best_epoch=best_epoch,
+        best_accuracy=best_acc,
+        duration_seconds=duration,
+    )
     return model, metrics
