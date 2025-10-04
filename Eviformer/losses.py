@@ -1,6 +1,10 @@
 import torch
 import torch.nn.functional as F
-from helpers import get_device
+
+try:
+    from .helpers import get_device
+except ImportError:  # pragma: no cover
+    from helpers import get_device  # type: ignore
 
 
 def relu_evidence(y):
