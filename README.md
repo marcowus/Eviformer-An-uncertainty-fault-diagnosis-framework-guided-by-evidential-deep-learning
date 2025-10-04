@@ -23,6 +23,42 @@
 ## Datasets
 * Any publicly available dataset that includes bearing or gear vibration signals can use this method.
 
+## Refactored CLI (v1)
+
+The repository now contains a standalone, script-style interface that does not rely on
+Python packages or `__init__.py` files. The new entry point is
+`Eviformer/cli_v1.py`, which can be executed directly:
+
+```
+python Eviformer/cli_v1.py train \
+  --data-root "D:/CWRU_Bearing_NumPy-main/Data" \
+  --model mcswint \
+  --epochs 100
+```
+
+Key features of the refactored pipeline include:
+
+* **Scan mode** for reproducing the verbose directory listing shown in the data
+  description:
+
+  ```
+  python Eviformer/cli_v1.py scan --data-root "D:/CWRU_Bearing_NumPy-main/Data"
+  ```
+
+* **Inspect mode** for printing dataset metadata without launching training:
+
+  ```
+  python Eviformer/cli_v1.py inspect --data-root "D:/CWRU_Bearing_NumPy-main/Data"
+  ```
+
+* **Train/Test modes** that share a simplified configuration surface while
+  maintaining the original evidential learning capabilities. Checkpoints are
+  stored at `./results/model_v1.pt` by default.
+
+All helper modules that support the CLI follow the `*_v1.py` naming convention
+for clarity (`data_pipeline_v1.py`, `model_factory_v1.py`, `training_loop_v1.py`,
+`evaluation_v1.py`, and `sequence_dataset_v1.py`).
+
 * ## Citation
 If our work is useful to you, please cite the following paper, it is the greatest encouragement to our open source work, thank you very much!
 ```
