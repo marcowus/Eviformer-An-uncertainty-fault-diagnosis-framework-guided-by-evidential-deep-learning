@@ -1,145 +1,144 @@
 import os
+from typing import List, Sequence, Tuple
+
+import numpy as np
 import pandas as pd
-from scipy.io import loadmat
 from sklearn.model_selection import train_test_split
 from SequenceDatasets import dataset
 from sequence_aug import *
 from tqdm import tqdm
 from torch.utils.data import DataLoader
 
-###Using CWRU data set
 signal_size = 1024
 
+NPZ_DEFAULT_RPM = "1797"
+NPZ_DEFAULT_CHANNEL = "DE12"
+NPZ_DEFAULT_RPM_DIR = f"{NPZ_DEFAULT_RPM} RPM"
+NPZ_NORMAL_TEMPLATE = "{rpm}_Normal.npz"
+_NPZ_FAULT_SPECS: Sequence[Tuple[str, str]] = (
+    ("B", "7"),
+    ("B", "14"),
+    ("B", "21"),
+    ("IR", "7"),
+    ("IR", "14"),
+    ("IR", "21"),
+    ("OR@6", "7"),
+    ("OR@6", "14"),
+    ("OR@6", "21"),
+)
 
-datasetname = ["12k Drive End Bearing Fault Data", "12k Fan End Bearing Fault Data", "48k Drive End Bearing Fault Data",
-               "Normal Baseline Data"]
-normalname = ["97.mat", "98.mat", "99.mat", "100.mat"]
 
-# For 12k Drive End Bearing Fault Data
-dataname1 = ["105.mat", "118.mat", "130.mat", "169.mat", "185.mat", "197.mat", "209.mat", "222.mat",
-             "234.mat"]  # 1797rpm
-dataname2 = ["106.mat", "119.mat", "131.mat", "170.mat", "186.mat", "198.mat", "210.mat", "223.mat",
-             "235.mat"]  # 1772rpm
-dataname3 = ["107.mat", "120.mat", "132.mat", "171.mat", "187.mat", "199.mat", "211.mat", "224.mat",
-             "236.mat"]  # 1750rpm
-dataname4 = ["108.mat", "121.mat", "133.mat", "172.mat", "188.mat", "200.mat", "212.mat", "225.mat",
-             "237.mat"]  # 1730rpm
-# For 12k Fan End Bearing Fault Data
-dataname5 = ["278.mat", "282.mat", "294.mat", "274.mat", "286.mat", "310.mat", "270.mat", "290.mat",
-             "315.mat"]  # 1797rpm
-dataname6 = ["279.mat", "283.mat", "295.mat", "275.mat", "287.mat", "309.mat", "271.mat", "291.mat",
-             "316.mat"]  # 1772rpm
-dataname7 = ["280.mat", "284.mat", "296.mat", "276.mat", "288.mat", "311.mat", "272.mat", "292.mat",
-             "317.mat"]  # 1750rpm
-dataname8 = ["281.mat", "285.mat", "297.mat", "277.mat", "289.mat", "312.mat", "273.mat", "293.mat",
-             "318.mat"]  # 1730rpm
-# For 48k Drive End Bearing Fault Data
-dataname9 = ["109.mat", "122.mat", "135.mat", "174.mat", "189.mat", "201.mat", "213.mat", "250.mat",
-             "262.mat"]  # 1797rpm
-dataname10 = ["110.mat", "123.mat", "136.mat", "175.mat", "190.mat", "202.mat", "214.mat", "251.mat",
-              "263.mat"]  # 1772rpm
-dataname11 = ["111.mat", "124.mat", "137.mat", "176.mat", "191.mat", "203.mat", "215.mat", "252.mat",
-              "264.mat"]  # 1750rpm
-dataname12 = ["112.mat", "125.mat", "138.mat", "177.mat", "192.mat", "204.mat", "217.mat", "253.mat",
-              "265.mat"]  # 1730rpm
-label
-label = [1, 2, 3, 4, 5, 6, 7, 8, 9]  # The failure data is labeled 1-9
+def _build_npz_filename(rpm: str, fault_prefix: str, defect_size: str, channel: str) -> str:
+    return f"{rpm}_{fault_prefix}_{defect_size}_{channel}.npz"
 
-axis = ["_DE_time", "_FE_time", "_BA_time"]
 
-# generate Training Dataset and Testing Dataset
-def get_files(root, test=False):
-    '''
-    This function is used to generate the final training set and test set.
-    root:The location of the data set
-    normalname:List of normal data
-    dataname:List of failure data
-    '''
-    data_root1 = os.path.join('/tmp', root, datasetname[0])
-    # data_root1 = os.path.join('/tmp', root, datasetname[3])
-    data_root2 = os.path.join('/tmp', root, datasetname[0])
+def _load_npz_signal(path: str) -> np.ndarray:
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Data file not found: {path}")
 
-    path1 = os.path.join('/tmp', data_root1, normalname[0])  # 0->1797rpm ;1->1772rpm;2->1750rpm;3->1730rpm
-    data, lab = data_load(path1, axisname=normalname[0], label=0)  # nThe label for normal data is 0
+    with np.load(path) as archive:
+        for key in ("signal", "data", "DE_time", "FE_time", "BA_time"):
+            if key in archive:
+                return np.asarray(archive[key])
+        return np.asarray(archive[archive.files[0]])
 
-    for i in tqdm(range(len(dataname1))):  # 这里可能需要改
-        path2 = os.path.join('/tmp', data_root2, dataname1[i])
 
-        data1, lab1 = data_load(path2, dataname1[i], label=label[i])
-        data += data1
-        lab += lab1
+def _window_signal(signal: np.ndarray, label: int) -> Tuple[List[np.ndarray], List[int]]:
+    signal = np.asarray(signal)
+    data: List[np.ndarray] = []
+    labels: List[int] = []
+
+    if signal.ndim == 1:
+        start, end = 0, signal_size
+        while end <= signal.shape[0]:
+            data.append(signal[start:end].astype(np.float32))
+            labels.append(label)
+            start += signal_size
+            end += signal_size
+    elif signal.ndim == 2:
+        for row in signal:
+            row = np.asarray(row).ravel()
+            if row.size < signal_size:
+                continue
+            data.append(row[:signal_size].astype(np.float32))
+            labels.append(label)
+    else:
+        raise ValueError(f"Unsupported signal shape {signal.shape}")
+
+    return data, labels
+
+
+def data_load_npz(filename: str, label: int) -> Tuple[List[np.ndarray], List[int]]:
+    signal = _load_npz_signal(filename)
+    return _window_signal(signal, label)
+
+
+def get_files(
+    root: str,
+    test: bool = False,
+    rpm_dir: str = NPZ_DEFAULT_RPM_DIR,
+    channel: str = NPZ_DEFAULT_CHANNEL,
+) -> List[List[np.ndarray]]:
+    data_dir = os.path.join(root, rpm_dir)
+    if not os.path.isdir(data_dir):
+        raise FileNotFoundError(f"Unable to locate data directory: {data_dir}")
+
+    rpm_value = rpm_dir.split()[0]
+    normal_path = os.path.join(data_dir, NPZ_NORMAL_TEMPLATE.format(rpm=rpm_value))
+    data, lab = data_load_npz(normal_path, label=0)
+
+    for idx, (fault_prefix, defect_size) in enumerate(tqdm(_NPZ_FAULT_SPECS)):
+        fault_filename = _build_npz_filename(rpm_value, fault_prefix, defect_size, channel)
+        fault_path = os.path.join(data_dir, fault_filename)
+        fault_data, fault_labels = data_load_npz(fault_path, label=idx + 1)
+        data.extend(fault_data)
+        lab.extend(fault_labels)
+
     return [data, lab]
 
 
-def data_load(filename, axisname, label):
-    '''
-    This function is mainly used to generate test data and training data.
-    filename:Data location
-    axisname:Select which channel's data,---->"_DE_time","_FE_time","_BA_time"
-    '''
-    datanumber = axisname.split(".")
-    if eval(datanumber[0]) < 100:
-        realaxis = "X0" + datanumber[0] + axis[0]
-    else:
-        realaxis = "X" + datanumber[0] + axis[0]
-    fl = loadmat(filename)[realaxis]
-    data = []
-    lab = []
-    start, end = 0, signal_size
-    while end <= fl.shape[0]:
-        data.append(fl[start:end])
-        lab.append(label)
-        # start += signal_size
-        # end += signal_size
-        start += 1024  # Overlapping swipe:512
-        end += 1024
-    return data, lab
-
-
-def data_transforms(dataset_type="train", normlize_type="-1-1"):
+def data_transforms(dataset_type: str = "train", normlize_type: str = "-1-1"):
     transforms = {
-        'train': Compose([
-            Reshape(),
-            Normalize(normlize_type),
-            Retype()
-
-        ]),
-        'val': Compose([
-            Reshape(),
-            Normalize(normlize_type),
-            Retype()
-        ])
+        "train": Compose([Reshape(), Normalize(normlize_type), Retype()]),
+        "val": Compose([Reshape(), Normalize(normlize_type), Retype()]),
     }
     return transforms[dataset_type]
 
 
+def load_cwru_dataset(
+    data_dir: str,
+    normlizetype: str,
+    test: bool = False,
+    rpm_dir: str = NPZ_DEFAULT_RPM_DIR,
+    channel: str = NPZ_DEFAULT_CHANNEL,
+):
+    list_data = get_files(data_dir, test=test, rpm_dir=rpm_dir, channel=channel)
 
-def load_cwru_dataset(data_dir, normlizetype, test=False):
-    num_classes = 7  ##make a change
-    input_channel = 1
-
-    list_data = get_files(data_dir, test)
     if test:
-        test_dataset = dataset(list_data=list_data, test=True, transform=None)
-        return test_dataset
-    else:
-        data_pd = pd.DataFrame({"data": list_data[0], "label": list_data[1]})
-        train_pd, val_pd = train_test_split(data_pd, test_size=0.20, random_state=40, stratify=data_pd["label"])
-        train_dataset = dataset(list_data=train_pd, transform=data_transforms('train', normlizetype))
-        val_dataset = dataset(list_data=val_pd, transform=data_transforms('val', normlizetype))
-        return train_dataset, val_dataset
+        return dataset(list_data=list_data, test=True, transform=None)
+
+    data_pd = pd.DataFrame({"data": list_data[0], "label": list_data[1]})
+    train_pd, val_pd = train_test_split(
+        data_pd,
+        test_size=0.20,
+        random_state=40,
+        stratify=data_pd["label"],
+    )
+    train_dataset = dataset(list_data=train_pd, transform=data_transforms("train", normlizetype))
+    val_dataset = dataset(list_data=val_pd, transform=data_transforms("val", normlizetype))
+    return train_dataset, val_dataset
 
 
-# Call a function and pass in parameters
-data_train, data_val = load_cwru_dataset('D:\CWRU', "0-1")
+if __name__ == "__main__":
+    base_dir = r"D:\\CWRU_Bearing_NumPy-main\\Data"
+    data_train, data_val = load_cwru_dataset(base_dir, "0-1")
 
-dataloader_train = DataLoader(
-            data_train, batch_size=16, shuffle=True, num_workers=0)
-dataloader_val = DataLoader(data_val, batch_size=16, num_workers=0)
+    dataloader_train = DataLoader(data_train, batch_size=16, shuffle=True, num_workers=0)
+    dataloader_val = DataLoader(data_val, batch_size=16, num_workers=0)
 
-dataloaders = {
-    "train": dataloader_train,
-    "val": dataloader_val,
-}
+    dataloaders = {
+        "train": dataloader_train,
+        "val": dataloader_val,
+    }
 
-digit_one, _ = data_val[5]
+    digit_one, _ = data_val[5]
